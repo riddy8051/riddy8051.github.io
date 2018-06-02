@@ -1,0 +1,220 @@
+#!/bin/bash -u
+
+# -- Final --
+# ************************************************************
+#    Lego Analog clock V1.0, (C) 2017 Andrew Riddett
+#		EV3 brick running Ev3dev V9
+#
+#  Hardware:	(1) Medium lego motor connected to port A, 18:1
+#				gears drives minute hand. Further 60:1 gears
+#				drive hour hand.
+#				(2) Colour sensor connected to port 1
+#				(3) push button connected to port 2
+#
+# ************************************************************
+
+# ************************************************************
+#    Print title screen
+echo
+echo "***********************************************"
+echo "          LEGO MINDSTORMS ev3dev"
+echo "  Fully automatic analogue clock, Version 1.0"
+echo "       by Andrew Riddett, 31/12/2017"
+echo "***********************************************"
+echo
+echo Start
+echo
+# ************************************************************
+# Set up motor and colour sensor.
+export MC=/sys/class/tacho-motor/motor0
+echo COL-COLOR > /sys/class/lego-sensor/sensor1/mode
+
+echo reset > $MC/command
+echo inversed > $MC/polarity
+echo 80 > $MC/duty_cycle_sp
+echo 250 > $MC/speed_sp
+
+# -- Start motor running --
+echo run-forever > $MC/command
+sleep 1
+
+# ***********************************************************
+#    Find position of Hour hand.
+# Run motor until colour sensor sees colour black.
+# Second loop checks that colour is still black after
+# rotation stops to eliminate false triggering by minute
+# hand
+
+echo -n "Locating Hour hand"
+while [ $(cat /sys/class/lego-sensor/sensor1/value0) -ne "1" ]
+do
+	echo run-forever > $MC/command
+	echo -n "."
+	while [ $(cat /sys/class/lego-sensor/sensor1/value0) -ne "1" ]
+	do
+		echo -n "."
+	done
+
+# -- Stop motor when colour is seen --
+	echo stop > $MC/command
+	sleep .5
+done
+echo stop > $MC/command
+echo
+echo -n "Found Hour hand, colour = "
+cat /sys/class/lego-sensor/sensor1/value0
+echo
+sleep .5
+
+# **************************************************************
+# Start motor running at slow speed and wait 1 second
+echo 30 > $MC/duty_cycle_sp
+echo run-forever > $MC/command
+sleep 1
+
+# **************************************************************
+# Find position of Minute hand.
+# Run motor until colour sensor sees colour White then stop
+
+echo -n "Locating minute hand"
+while [ $(cat /sys/class/lego-sensor/sensor1/value0) -ne "6" ]
+do
+        echo -n "."
+done
+echo
+echo -n "Found Minute hand, colour = ";
+cat /sys/class/lego-sensor/sensor1/value0
+echo COL-AMBIENT > /sys/class/lego-sensor/sensor1/mode
+echo
+
+echo stop > $MC/command
+sleep .5
+
+# Adjust for over-run in minute hand
+echo -20 > $MC/position_sp
+echo run-to-rel-pos > $MC/command
+sleep .5
+
+
+# ***********************************************************
+#   Calculate motor steps to display current time.
+# 18 steps = 1 minute on the clock. RTC time in converted to
+# minutes and multiplied by 18.  Clock is currently at 6:30
+# so 7020 steps are removed.  Wait until minute changes then 
+# clock is then moved into correct time position.
+
+echo -n "Waiting for minute to change"
+c_minute=$(date +%M)
+old_time=$(date +%M)
+while [[ $old_time -eq $c_minute ]]
+do
+	c_minute=$(date +%M)
+	sleep 1
+	echo -n "."
+done
+
+echo
+echo "Done"
+echo
+
+c_hour=$(date +%H)
+c_minute=$(date +%M)
+echo -n "Time $c_hour : $c_minute , "
+c_hour=${c_hour#0}
+c_minute=${c_minute#0}
+if [ $c_hour -gt 11 ]
+then
+	c_hour=$(($c_hour - 12))
+fi
+c_time=$(($c_hour * 60 + $c_minute))
+c_steps=$(($c_time * 18 - 7020))
+old_time=$c_time
+error=0
+pos_premove=$(cat $MC/position)
+
+echo "Minutes $c_time , Steps $c_steps"
+echo 50 > $MC/duty_cycle_sp
+echo $c_steps > $MC/position_sp
+echo run-to-rel-pos > $MC/command
+sleep 30
+echo
+pos_postmove=$(cat $MC/position)
+error=$(($pos_postmove - $pos_premove - $c_steps))
+echo "Move complete. Requested: $c_steps , Error $error"
+echo 30 > $MC/duty_cycle_sp
+echo $((0 - $error)) > $MC/position_sp
+echo run-to-rel-pos > $MC/command
+echo "Corrected"
+echo
+sleep 1
+
+# **************************************************************
+# Clock is now running.  If time has changed since last check,
+# move hands forward one minute.  If touch sensor is pressed,
+# exit program
+
+error=0
+echo reset > $MC/command
+echo inversed > $MC/polarity
+step_size=$((15 - ($error / 2)))
+
+# **************************************************************
+# Run while button is NOT pressed
+
+while [ $(cat /sys/class/lego-sensor/sensor0/value0) -ne "1" ]
+do
+# Read RTC and put current time into c_time as minutes past midnight.
+	c_hour=$(date +%H)
+	c_minute=$(date +%M)
+	c_hour=${c_hour#0}
+	c_minute=${c_minute#0}
+	if [ $c_hour -gt 11 ]
+	then
+        	c_hour=$(($c_hour - 12))
+	fi
+
+	c_time=$(($c_hour * 60 + $c_minute))
+
+	if [[ $c_time -eq 0 ]]
+	then
+		echo reset > $MC/command
+		echo inversed > $MC/polarity
+	fi
+
+# If current time is different to past time, move hands
+	if [[ $c_time -ne $old_time ]]
+	then
+		pos_premove=$(cat $MC/position)
+
+		echo 30 > $MC/duty_cycle_sp
+		echo $step_size > $MC/position_sp
+		echo run-to-rel-pos > $MC/command
+		old_time=$c_time
+		sleep 1
+
+# Note: Although technicaly 18 steps = 1 minute movement on the clock,
+#		there is some mechanical over-run ie: the motor does not stop
+#		immediately.  I found that driving the motor 12 to 14 steps at 
+#		a time +/- error seems to work best.
+
+
+# *****************************************************************
+#  Calculate next step size based on current position vs requested
+#  position.
+ 
+		pos_postmove=$(cat $MC/position)
+		error=$(($pos_postmove - $pos_premove +$error - 18))
+#		step_size=$((14 - ($error / 2)))
+		step_size=$((12 - $error))
+		c_hour=$(date +%H)
+		c_minute=$(date +%M)
+		echo "Time $c_hour : $c_minute , Minutes $c_time"
+		echo "Pre: $pos_premove , Post: $pos_postmove , Error: $error"
+		echo "Next step size: $step_size"
+		echo
+	fi
+	sleep 1
+done
+
+
+echo End
